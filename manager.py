@@ -239,25 +239,103 @@ def refresh_commands(config_path: str, cfg: dict):
     if ok:
         print("[OK] Command files regenerated.")
         for phase in cfg.get("phases", []):
-            n = count_lines(phase["file"])
+            n = count_lines(phase.get("file", ""))
             print(f"  - [{phase['id']}] {phase['description']}: {n} tasks")
     else:
         print("[FAIL] Check runner.py output.")
     input("\nEnter to return...")
 
 
-def submit_phase(phase: dict, dependency_id: Optional[str] = None) -> Optional[str]:
-    n = count_lines(phase["file"])
+def check_completed(cfg: dict, phase: Optional[dict] = None) -> Optional[str]:
+    """
+    Show completed/pending runs for a phase (or all). Returns "overwrite_all",
+    "skip_all", or None if cancelled.
+    """
+    results_dir = cfg.get("output_dir", "./results")
+    import glob as _glob
+    completed_ids = {
+        Path(p).parent.name
+        for p in _glob.glob(os.path.join(results_dir, "*", "runs.csv"))
+    }
+
+    phases = [phase] if phase else cfg.get("phases", [])
+    all_run_ids: list[str] = []
+    for ph in phases:
+        cmd_file = ph.get("file", "")
+        if not os.path.exists(cmd_file):
+            continue
+        with open(cmd_file) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split()
+                for i, p in enumerate(parts):
+                    if p == "--run-id" and i + 1 < len(parts):
+                        all_run_ids.append(parts[i + 1])
+                        break
+
+    if not all_run_ids:
+        print("\n  No command files found. Run [R] first.")
+        input("\nEnter to return...")
+        return None
+
+    done = [r for r in all_run_ids if r in completed_ids]
+    pending = [r for r in all_run_ids if r not in completed_ids]
+
+    print(f"\n  Total: {len(all_run_ids)}  |  Done: {len(done)}  |  Pending: {len(pending)}")
+
+    if done:
+        print(f"\n  Completed ({len(done)}):")
+        for r in done[:20]:
+            print(f"    [x] {r}")
+        if len(done) > 20:
+            print(f"    ... and {len(done) - 20} more")
+
+    if pending:
+        print(f"\n  Pending ({len(pending)}):")
+        for r in pending[:20]:
+            print(f"    [ ] {r}")
+        if len(pending) > 20:
+            print(f"    ... and {len(pending) - 20} more")
+
+    if not done:
+        input("\nAll runs pending. Enter to return...")
+        return None
+
+    print("\n  Completed runs found. What to do when submitting?")
+    print("  [S] Skip completed   [O] Overwrite all   [C] Cancel")
+    while True:
+        choice = input("  Choice: ").strip().upper()
+        if choice == "S":
+            input("\nWill skip completed runs. Enter to return...")
+            return "skip_all"
+        if choice == "O":
+            input("\nWill overwrite completed runs. Enter to return...")
+            return "overwrite_all"
+        if choice == "C":
+            return None
+        print("  Enter S, O, or C.")
+
+
+def submit_phase(
+    phase: dict,
+    dependency_id: Optional[str] = None,
+    overwrite: bool = False,
+) -> Optional[str]:
+    n = count_lines(phase.get("file", ""))
     if n == 0:
         print(f"\n[WARN] {phase['file']} is empty or missing. Run [R] first.")
         return None
 
     dep = f"--dependency=afterok:{dependency_id}" if dependency_id else ""
     job_name = f"QCL_{phase['id']}_{phase['name']}"
+    overwrite_flag = "--overwrite" if overwrite else ""
     cmd = (
         f"sbatch --parsable --job-name='{job_name}' "
         f"--array=1-{n}%30 {dep} "
-        f"--export=CMD_FILE={phase['file']} slurm_generic.sh"
+        f"--export=CMD_FILE={phase['file']},EXTRA_ARGS={overwrite_flag} "
+        f"slurm_generic.sh"
     )
     print(f"\n[SUBMIT] {phase['description']} ({n} tasks)...")
     job_id = run_cmd(cmd, capture=True)
@@ -266,17 +344,17 @@ def submit_phase(phase: dict, dependency_id: Optional[str] = None) -> Optional[s
     return job_id
 
 
-def launch_full_pipeline(cfg: dict):
+def launch_full_pipeline(cfg: dict, overwrite: bool = False):
     phases = cfg.get("phases", [])
     print(f"\n[PIPELINE] Submitting {len(phases)} phases with sequential dependencies...")
     prev_id = None
     ids = []
     for phase in phases:
-        job_id = submit_phase(phase, dependency_id=prev_id)
-        ids.append(job_id)
+        job_id = submit_phase(phase, dependency_id=prev_id, overwrite=overwrite)
+        ids.append(str(job_id) if job_id else "?")
         if job_id:
             prev_id = job_id
-    print(f"\n[OK] Chain: {' -> '.join(str(i) for i in ids)}")
+    print(f"\n[OK] Chain: {' -> '.join(ids)}")
     input("\nEnter to return...")
 
 
@@ -322,6 +400,7 @@ def main():
         print()
         print("  [F]  Launch FULL PIPELINE (all phases, sequential deps)")
         print("  [M]  Monitor progress  (live, refreshes every 2s)")
+        print("  [C]  Check completed / pending runs")
         print("  [T]  Generate LaTeX tables")
         print("  [P]  Generate paper figures (Figure 2 & 3)")
         print("  [X]  Exit")
@@ -332,9 +411,13 @@ def main():
         if choice == "R":
             refresh_commands(args.config, cfg)
         elif choice == "F":
-            launch_full_pipeline(cfg)
+            overwrite_mode = check_completed(cfg)
+            overwrite = overwrite_mode == "overwrite_all"
+            launch_full_pipeline(cfg, overwrite=overwrite)
         elif choice == "M":
             show_monitor(cfg)
+        elif choice == "C":
+            check_completed(cfg)
         elif choice == "T":
             generate_tables(args.config)
         elif choice == "P":
@@ -344,7 +427,9 @@ def main():
             break
         elif choice in {p["id"] for p in phases}:
             phase = next(p for p in phases if p["id"] == choice)
-            submit_phase(phase)
+            overwrite_mode = check_completed(cfg, phase=phase)
+            overwrite = overwrite_mode == "overwrite_all"
+            submit_phase(phase, overwrite=overwrite)
             input("\nEnter to return...")
         else:
             print("Invalid option.")

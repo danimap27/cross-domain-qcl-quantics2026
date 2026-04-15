@@ -7,17 +7,23 @@ exports command lists for SLURM array jobs.
 
 Usage:
     # Export command files for all phases
-    python runner.py --config config.yaml --dry-run --export-commands
+    python runner.py --config config.yaml --export-commands
 
-    # Run phase 1 locally (topology ideal)
+    # Run phase 1 locally (topology ideal) — prompts skip/overwrite for completed runs
     python runner.py --config config.yaml --phase topology_ideal
 
     # Run a single experiment directly
     python runner.py --config config.yaml \
         --ansatz ttn --noise ideal --source synthetic_gaussian --seed 42
 
-    # Run inside a SLURM array (called by slurm_generic.sh)
+    # Run inside a SLURM array (called by slurm_generic.sh) — skips completed silently
     python runner.py --config config.yaml --run-id <run_id>
+
+    # Overwrite completed runs without prompting (batch / SLURM use)
+    python runner.py --config config.yaml --phase topology_ideal --overwrite
+
+    # Show status of all runs without executing
+    python runner.py --config config.yaml --status
 """
 
 import argparse
@@ -113,6 +119,57 @@ def is_completed(run_id: str, results_dir: str) -> bool:
     return csv_path.exists()
 
 
+def delete_run(run_id: str, results_dir: str):
+    """Remove results for a run so it will be re-executed."""
+    import shutil
+    run_dir = Path(results_dir) / run_id
+    if run_dir.exists():
+        shutil.rmtree(run_dir)
+        logger.info(f"Deleted results for {run_id}")
+
+
+# ---------------------------------------------------------------------------
+# Skip / Overwrite prompt
+# ---------------------------------------------------------------------------
+
+_PROMPT_CHOICES = ("s", "o", "sa", "oa")
+
+
+def prompt_overwrite(run_id: str, bulk_decision: list) -> bool:
+    """
+    Ask the user whether to skip or overwrite a completed run.
+
+    bulk_decision is a 1-element list used as a mutable out-parameter:
+      None  → ask each time
+      "skip_all"      → skip without prompting
+      "overwrite_all" → overwrite without prompting
+
+    Returns True if the run should be executed (overwrite), False to skip.
+    """
+    if bulk_decision[0] == "skip_all":
+        logger.info(f"Skipping (skip-all): {run_id}")
+        return False
+    if bulk_decision[0] == "overwrite_all":
+        logger.info(f"Overwriting (overwrite-all): {run_id}")
+        return True
+
+    while True:
+        print(f"\n  Run already completed: {run_id}")
+        print("  [S] Skip   [O] Overwrite   [SA] Skip All   [OA] Overwrite All")
+        choice = input("  Choice: ").strip().lower()
+        if choice == "s":
+            return False
+        if choice == "o":
+            return True
+        if choice == "sa":
+            bulk_decision[0] = "skip_all"
+            return False
+        if choice == "oa":
+            bulk_decision[0] = "overwrite_all"
+            return True
+        print("  Invalid — enter S, O, SA, or OA.")
+
+
 # ---------------------------------------------------------------------------
 # Result persistence
 # ---------------------------------------------------------------------------
@@ -196,38 +253,61 @@ def execute_run(run_spec: dict, cfg: dict, machine_id: str = "local"):
 
 
 # ---------------------------------------------------------------------------
+# Status display
+# ---------------------------------------------------------------------------
+
+def show_status(runs: list[dict], results_dir: str):
+    """Print a table of completed/pending runs."""
+    done = [r for r in runs if is_completed(r["run_id"], results_dir)]
+    pending = [r for r in runs if not is_completed(r["run_id"], results_dir)]
+    print(f"\n  Total: {len(runs)}  |  Done: {len(done)}  |  Pending: {len(pending)}\n")
+    if done:
+        print(f"  {'COMPLETED':^50}")
+        for r in done:
+            print(f"    [x] {r['run_id']}")
+    if pending:
+        print(f"\n  {'PENDING':^50}")
+        for r in pending:
+            print(f"    [ ] {r['run_id']}")
+    print()
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(description="Cross-Domain QCL experiment runner")
-    parser.add_argument("--config", default="config.yaml", help="Path to config.yaml")
-    parser.add_argument("--phase", default=None, help="Phase name to run (from config phases)")
-    parser.add_argument("--run-id", default=None, help="Execute a specific run by its ID")
+    parser.add_argument("--config", default="config.yaml")
+    parser.add_argument("--phase", default=None, help="Phase name from config phases")
+    parser.add_argument("--run-id", default=None, help="Execute a specific run (SLURM use)")
     parser.add_argument("--ansatz", default=None)
-    parser.add_argument("--noise", default=None, help="Noise model name")
+    parser.add_argument("--noise", default=None)
     parser.add_argument("--source", default=None)
     parser.add_argument("--seed", type=int, default=None)
-    parser.add_argument("--dry-run", action="store_true", help="Do not execute, only show planned runs")
-    parser.add_argument("--export-commands", action="store_true", help="Export commands to phase .txt files")
+    parser.add_argument("--dry-run", action="store_true", help="List pending runs without executing")
+    parser.add_argument("--status", action="store_true", help="Show completed/pending status and exit")
+    parser.add_argument("--export-commands", action="store_true")
+    parser.add_argument("--overwrite", action="store_true",
+                        help="Overwrite completed runs without prompting (for SLURM batch)")
     parser.add_argument("--machine-id", default="local")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
     all_runs = list(iter_all_runs(cfg))
+    results_dir = cfg.get("output_dir", "./results")
 
-    # --- Export commands for all phases ---
+    # ── Export commands ────────────────────────────────────────────────────────
     if args.export_commands:
         for phase in cfg.get("phases", []):
             filtered = apply_phase_filter(all_runs, phase)
             export_commands(filtered, phase["file"], args.config)
         return
 
-    # --- Specific run by ID (called by SLURM) ---
+    # ── Single run by ID (called by SLURM array) ──────────────────────────────
     if args.run_id:
         run_spec = next((r for r in all_runs if r["run_id"] == args.run_id), None)
         if run_spec is None:
-            # Reconstruct from CLI args
             run_spec = {
                 "run_id": args.run_id,
                 "ansatz": args.ansatz,
@@ -235,22 +315,24 @@ def main():
                 "source": args.source,
                 "seed": args.seed,
             }
-        results_dir = cfg.get("output_dir", "./results")
-        if is_completed(args.run_id, results_dir):
-            logger.info(f"Run {args.run_id} already completed. Skipping.")
+        if is_completed(args.run_id, results_dir) and not args.overwrite:
+            logger.info(f"Already completed, skipping: {args.run_id}")
             return
+        if args.overwrite:
+            delete_run(args.run_id, results_dir)
         execute_run(run_spec, cfg, args.machine_id)
         return
 
-    # --- Phase run ---
+    # ── Build run list from phase / manual filters ─────────────────────────────
     if args.phase:
-        phase_cfg = next((p for p in cfg.get("phases", []) if p["name"] == args.phase), None)
+        phase_cfg = next(
+            (p for p in cfg.get("phases", []) if p["name"] == args.phase), None
+        )
         if phase_cfg is None:
             logger.error(f"Phase '{args.phase}' not found in config.")
             sys.exit(1)
         runs = apply_phase_filter(all_runs, phase_cfg)
     elif args.ansatz or args.noise or args.source or args.seed is not None:
-        # Manual filter from CLI
         runs = all_runs
         if args.ansatz:
             runs = [r for r in runs if r["ansatz"] == args.ansatz]
@@ -263,17 +345,49 @@ def main():
     else:
         runs = all_runs
 
-    results_dir = cfg.get("output_dir", "./results")
-    pending = [r for r in runs if not is_completed(r["run_id"], results_dir)]
-
-    logger.info(f"Total planned: {len(runs)} | Pending: {len(pending)} | Done: {len(runs) - len(pending)}")
-
-    if args.dry_run:
-        for r in pending:
-            print(f"  {r['run_id']}")
+    # ── Status display and exit ────────────────────────────────────────────────
+    if args.status:
+        show_status(runs, results_dir)
         return
 
-    for r in pending:
+    done_runs = [r for r in runs if is_completed(r["run_id"], results_dir)]
+    pending_runs = [r for r in runs if not is_completed(r["run_id"], results_dir)]
+
+    logger.info(
+        f"Total: {len(runs)} | Done: {len(done_runs)} | Pending: {len(pending_runs)}"
+    )
+
+    if args.dry_run:
+        print("\n  Pending runs:")
+        for r in pending_runs:
+            print(f"    {r['run_id']}")
+        return
+
+    # ── Interactive skip/overwrite for completed runs (local mode) ────────────
+    # bulk_decision[0]: None → ask each time, "skip_all", "overwrite_all"
+    bulk_decision = [None]
+
+    if done_runs and not args.overwrite:
+        print(f"\n  {len(done_runs)} run(s) already completed.")
+        show_status(runs, results_dir)
+
+    to_run = list(pending_runs)
+
+    for r in done_runs:
+        if args.overwrite:
+            delete_run(r["run_id"], results_dir)
+            to_run.append(r)
+        else:
+            if prompt_overwrite(r["run_id"], bulk_decision):
+                delete_run(r["run_id"], results_dir)
+                to_run.append(r)
+
+    if not to_run:
+        logger.info("Nothing to run.")
+        return
+
+    logger.info(f"Running {len(to_run)} experiment(s)...")
+    for r in to_run:
         try:
             execute_run(r, cfg, args.machine_id)
         except Exception as e:
