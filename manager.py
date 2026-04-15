@@ -311,7 +311,15 @@ def check_completed(cfg: dict, phase: Optional[dict] = None) -> Optional[str]:
             input("\nWill skip completed runs. Enter to return...")
             return "skip_all"
         if choice == "O":
-            input("\nWill overwrite completed runs. Enter to return...")
+            print(f"\n  Deleting results for {len(done)} run(s)...")
+            import shutil
+            for run_id in done:
+                run_dir = Path(results_dir) / run_id
+                if run_dir.exists():
+                    shutil.rmtree(run_dir)
+                    print(f"    Removed: {run_dir}")
+            print(f"  Done. {len(done)} folder(s) deleted.")
+            input("\nPress Enter to continue...")
             return "overwrite_all"
         if choice == "C":
             return None
