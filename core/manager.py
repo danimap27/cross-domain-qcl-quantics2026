@@ -63,6 +63,8 @@ def run_cmd(cmd: str, capture: bool = False):
         return True
     except subprocess.CalledProcessError as e:
         print(f"\n[ERROR] {cmd}\n{e}")
+        if hasattr(e, 'stderr') and e.stderr:
+            print(f"[STDERR] {e.stderr.strip()}")
         return None
 
 
@@ -246,13 +248,16 @@ def refresh_commands(config_path: str, cfg: dict):
     input("\nEnter to return...")
 
 
-def check_completed(cfg: dict, phase: Optional[dict] = None) -> Optional[str]:
+def check_completed(cfg: dict, phase: Optional[dict] = None, view_only: bool = False) -> Optional[str]:
     """
-    Show completed/pending runs for a phase (or all). Returns "overwrite_all",
-    "skip_all", or None if cancelled.
+    Comprueba runs completados/pendientes.
+    - view_only=True : solo muestra estado (opción [C] del menú)
+    - view_only=False: si hay completados, pregunta qué hacer (2 opciones)
+      Devuelve "skip_all", "overwrite_all", o None (cancelar)
     """
     results_dir = cfg.get("output_dir", "./results")
     import glob as _glob
+    import shutil
     completed_ids = {
         Path(p).parent.name
         for p in _glob.glob(os.path.join(results_dir, "*", "runs.csv"))
@@ -276,54 +281,56 @@ def check_completed(cfg: dict, phase: Optional[dict] = None) -> Optional[str]:
                         break
 
     if not all_run_ids:
-        print("\n  No command files found. Run [R] first.")
-        input("\nEnter to return...")
+        print("\n  No hay archivos de comandos. Ejecuta [R] primero.")
+        input("\nEnter para volver...")
         return None
 
     done = [r for r in all_run_ids if r in completed_ids]
     pending = [r for r in all_run_ids if r not in completed_ids]
 
-    print(f"\n  Total: {len(all_run_ids)}  |  Done: {len(done)}  |  Pending: {len(pending)}")
+    print(f"\n  Total: {len(all_run_ids)}  |  Completados: {len(done)}  |  Pendientes: {len(pending)}")
 
-    if done:
-        print(f"\n  Completed ({len(done)}):")
-        for r in done[:20]:
-            print(f"    [x] {r}")
-        if len(done) > 20:
-            print(f"    ... and {len(done) - 20} more")
-
-    if pending:
-        print(f"\n  Pending ({len(pending)}):")
-        for r in pending[:20]:
-            print(f"    [ ] {r}")
-        if len(pending) > 20:
-            print(f"    ... and {len(pending) - 20} more")
-
-    if not done:
-        input("\nAll runs pending. Enter to return...")
+    if view_only:
+        if done:
+            print(f"\n  Completados ({len(done)}):")
+            for r in done[:20]:
+                print(f"    [x] {r}")
+            if len(done) > 20:
+                print(f"    ... y {len(done) - 20} más")
+        if pending:
+            print(f"\n  Pendientes ({len(pending)}):")
+            for r in pending[:20]:
+                print(f"    [ ] {r}")
+            if len(pending) > 20:
+                print(f"    ... y {len(pending) - 20} más")
+        input("\nEnter para volver...")
         return None
 
-    print("\n  Completed runs found. What to do when submitting?")
-    print("  [S] Skip completed   [O] Overwrite all   [C] Cancel")
+    # Sin completados: ejecutar directo
+    if not done:
+        return "skip_all"
+
+    # Con completados: 2 opciones claras
+    print(f"\n  Hay {len(done)} run(s) ya completados.")
+    print(f"  [1] Mantener resultados y ejecutar solo los {len(pending)} pendientes")
+    print(f"  [2] Borrar todo y reejecutar los {len(all_run_ids)} runs desde cero")
+    print(f"  [C] Cancelar")
     while True:
-        choice = input("  Choice: ").strip().upper()
-        if choice == "S":
-            input("\nWill skip completed runs. Enter to return...")
+        choice = input("  Opción: ").strip().upper()
+        if choice == "1":
             return "skip_all"
-        if choice == "O":
-            print(f"\n  Deleting results for {len(done)} run(s)...")
-            import shutil
+        if choice == "2":
+            print(f"\n  Borrando resultados de {len(done)} run(s)...")
             for run_id in done:
                 run_dir = Path(results_dir) / run_id
                 if run_dir.exists():
                     shutil.rmtree(run_dir)
-                    print(f"    Removed: {run_dir}")
-            print(f"  Done. {len(done)} folder(s) deleted.")
-            input("\nPress Enter to continue...")
+                    print(f"    Eliminado: {run_dir}")
+            print(f"  Listo. {len(done)} carpeta(s) eliminadas.")
             return "overwrite_all"
         if choice == "C":
             return None
-        print("  Enter S, O, or C.")
+        print("  Introduce 1, 2 o C.")
 
 
 def submit_phase(
@@ -338,11 +345,13 @@ def submit_phase(
 
     dep = f"--dependency=afterok:{dependency_id}" if dependency_id else ""
     job_name = f"QCL_{phase['id']}_{phase['name']}"
-    overwrite_flag = "--overwrite" if overwrite else ""
+    export_vars = f"CMD_FILE={phase['file']}"
+    if overwrite:
+        export_vars += ",EXTRA_ARGS=--overwrite"
     cmd = (
         f"sbatch --parsable --job-name='{job_name}' "
         f"--array=1-{n}%30 {dep} "
-        f"--export=CMD_FILE={phase['file']},EXTRA_ARGS={overwrite_flag} "
+        f"--export={export_vars} "
         f"core/slurm_generic.sh"
     )
     print(f"\n[SUBMIT] {phase['description']} ({n} tasks)...")
@@ -419,13 +428,13 @@ def main():
         if choice == "R":
             refresh_commands(args.config, cfg)
         elif choice == "F":
-            overwrite_mode = check_completed(cfg)
-            overwrite = overwrite_mode == "overwrite_all"
-            launch_full_pipeline(cfg, overwrite=overwrite)
+            mode = check_completed(cfg)
+            if mode is not None:
+                launch_full_pipeline(cfg, overwrite=(mode == "overwrite_all"))
         elif choice == "M":
             show_monitor(cfg)
         elif choice == "C":
-            check_completed(cfg)
+            check_completed(cfg, view_only=True)
         elif choice == "T":
             generate_tables(args.config)
         elif choice == "P":
@@ -435,10 +444,10 @@ def main():
             break
         elif choice in {p["id"] for p in phases}:
             phase = next(p for p in phases if p["id"] == choice)
-            overwrite_mode = check_completed(cfg, phase=phase)
-            overwrite = overwrite_mode == "overwrite_all"
-            submit_phase(phase, overwrite=overwrite)
-            input("\nEnter to return...")
+            mode = check_completed(cfg, phase=phase)
+            if mode is not None:
+                submit_phase(phase, overwrite=(mode == "overwrite_all"))
+                input("\nEnter to return...")
         else:
             print("Invalid option.")
             time.sleep(1)
