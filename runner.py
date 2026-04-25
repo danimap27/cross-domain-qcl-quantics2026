@@ -38,11 +38,6 @@ from typing import Iterator
 
 import yaml
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)],
-)
 logger = logging.getLogger(__name__)
 
 
@@ -156,7 +151,12 @@ def prompt_overwrite(run_id: str, bulk_decision: list) -> bool:
     while True:
         print(f"\n  Run already completed: {run_id}")
         print("  [S] Skip   [O] Overwrite   [SA] Skip All   [OA] Overwrite All")
-        choice = input("  Choice: ").strip().lower()
+        try:
+            choice = input("  Choice: ").strip().lower()
+        except EOFError:
+            logger.info("EOF received — defaulting to skip-all.")
+            bulk_decision[0] = "skip_all"
+            return False
         if choice == "s":
             return False
         if choice == "o":
@@ -277,6 +277,11 @@ def show_status(runs: list[dict], results_dir: str):
 # ---------------------------------------------------------------------------
 
 def main():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=[logging.StreamHandler(sys.stdout)],
+    )
     parser = argparse.ArgumentParser(description="Cross-Domain QCL experiment runner")
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--phase", default=None, help="Phase name from config phases")

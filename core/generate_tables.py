@@ -60,6 +60,8 @@ def fmt_ms(series: pd.Series, as_pct: bool = True) -> str:
         return "---"
     mean = series.mean()
     std = series.std(ddof=1) if len(series) > 1 else 0.0
+    if pd.isna(mean) or pd.isna(std):
+        return "---"
     if as_pct:
         return f"${mean*100:.1f} \\pm {std*100:.1f}$"
     return f"${mean:.2f} \\pm {std:.2f}$"
@@ -123,6 +125,7 @@ def make_topology_table(df: pd.DataFrame, cfg: dict, out_dir: str):
     for ansatz in ansatz_order:
         a_label = ansatz_labels.get(ansatz, ansatz)
         first_noise = True
+        rows_added = 0
         for noise in noise_order:
             n_label = noise_labels.get(noise, noise)
             row_df = sub[(sub["ansatz"] == ansatz) & (sub["noise_model"] == noise)]
@@ -139,9 +142,12 @@ def make_topology_table(df: pd.DataFrame, cfg: dict, out_dir: str):
             ]
             first_noise = False
             lines.append(" & ".join(row) + r" \\")
-        lines.append(r"\midrule")
+            rows_added += 1
+        if rows_added > 0:
+            lines.append(r"\midrule")
 
-    lines[-1] = r"\bottomrule"
+    if lines[-1] == r"\midrule":
+        lines[-1] = r"\bottomrule"
     lines += [r"\end{tabular}", r"\end{table*}"]
     write_tex(os.path.join(out_dir, "tab_topology.tex"), "\n".join(lines) + "\n")
 
@@ -189,6 +195,7 @@ def make_crossdomain_table(df: pd.DataFrame, cfg: dict, out_dir: str):
     for source in source_order:
         s_label = source_labels.get(source, source)
         first_noise = True
+        rows_added = 0
         for noise in noise_order:
             n_label = noise_labels.get(noise, noise)
             row_df = sub[(sub["source"] == source) & (sub["noise_model"] == noise)]
@@ -205,9 +212,12 @@ def make_crossdomain_table(df: pd.DataFrame, cfg: dict, out_dir: str):
             ]
             first_noise = False
             lines.append(" & ".join(row) + r" \\")
-        lines.append(r"\midrule")
+            rows_added += 1
+        if rows_added > 0:
+            lines.append(r"\midrule")
 
-    lines[-1] = r"\bottomrule"
+    if lines[-1] == r"\midrule":
+        lines[-1] = r"\bottomrule"
     lines += [r"\end{tabular}", r"\end{table*}"]
     write_tex(os.path.join(out_dir, "tab_crossdomain.tex"), "\n".join(lines) + "\n")
 

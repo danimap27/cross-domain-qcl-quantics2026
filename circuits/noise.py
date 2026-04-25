@@ -44,6 +44,8 @@ def _gamma_phase(t_gate_s: float, T1_s: float, T2_s: float) -> float:
     We return the Kraus operator parameter for PhaseDamping.
     """
     lam = t_gate_s * (1.0 / T2_s - 1.0 / (2.0 * T1_s))
+    if lam < 0:
+        return 0.0
     return 1.0 - math.exp(-lam)
 
 

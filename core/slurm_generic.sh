@@ -14,6 +14,9 @@
 #SBATCH --mail-type=FAIL
 #SBATCH --mail-user=dmarper2@upo.es
 
+# Ensure log directory exists before SLURM tries to write
+mkdir -p logs
+
 # ── 1. Conda activation ────────────────────────────────────────────────────
 # Hercules: explicit path; fallback to auto-detection for other clusters.
 HERCULES_CONDA="/lustre/software/easybuild/common/software/Miniconda3/4.9.2"
@@ -67,7 +70,10 @@ echo "============================================================"
 echo "CMD: $CMD"
 echo "------------------------------------------------------------"
 
-eval "$CMD ${EXTRA_ARGS} --machine-id hercules"
+# Safer execution: parse command into array and run directly
+# CMD is expected to be a simple python runner.py ... command
+set -- $CMD ${EXTRA_ARGS} --machine-id hercules
+"$@"
 
 EXIT_CODE=$?
 echo "------------------------------------------------------------"

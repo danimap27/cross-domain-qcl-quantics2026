@@ -187,7 +187,8 @@ def run_qcl(cfg: QCLRunConfig) -> QCLResult:
     is_noisy = cfg.noise_model != "ideal"
     # Use fast C++ backend for ideal simulations
     backend = "default.mixed" if is_noisy else "lightning.qubit"
-    diff_method = "backprop" if is_noisy else "adjoint"
+    # default.mixed does not support backprop; let PennyLane pick the best method
+    diff_method = "best" if is_noisy else "adjoint"
 
     # Pass the noise dictionary to enable gate-wise error channels
     noise_params = IBM_HERON_R2 if is_noisy else None
